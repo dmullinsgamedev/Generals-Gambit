@@ -8,15 +8,2173 @@
   <script src="https://unpkg.com/three@0.110.0/examples/js/controls/OrbitControls.js"></script>
   <script src="https://cdn.jsdelivr.net/gh/IceCreamYou/THREE.Terrain@v1.2.0/build/THREE.Terrain.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
+  <style>
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #7ee8fa 0%, #eec0c6 100%);
+      font-family: 'Luckiest Guy', cursive, Arial, sans-serif;
+      color: #222;
+      overflow: hidden;
+    }
+    #ui {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      pointer-events: none;
+    }
+    .card-row {
+      display: flex;
+      gap: 1.5em;
+      margin: 1em 0;
+      pointer-events: auto;
+    }
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+      padding: 1em 2em;
+      font-size: 1.3em;
+      cursor: pointer;
+      transition: transform 0.1s, box-shadow 0.1s;
+      user-select: none;
+      border: 3px solid #222;
+      min-width: 120px;
+      text-align: center;
+    }
+    .card.selected, .card:hover {
+      transform: scale(1.08) rotate(-2deg);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+      border-color: #ff5e62;
+      background: #ffe;
+    }
+
+    #scoreboard {
+      background: rgba(255,255,255,0.95);
+      border-radius: 12px;
+      padding: 1em 2em;
+      margin: 1em 0;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.10);
+      pointer-events: auto;
+      text-align: center;
+    }
+    .menu-btn {
+      background: #ff5e62;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 0.7em 1.5em;
+      font-size: 1.1em;
+      font-family: inherit;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+      transition: background 0.1s;
+    }
+    .menu-btn:active {
+      background: #ff9966;
+    }
+    #shareBtn {
+      background: #1da1f2;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 0.7em 1.5em;
+      font-size: 1.1em;
+      font-family: inherit;
+      cursor: pointer;
+      margin-top: 1em;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+      transition: background 0.1s;
+    }
+    #shareBtn:active {
+      background: #0d8ddb;
+    }
+    @media (max-width: 600px) {
+      .card { font-size: 1em; min-width: 80px; padding: 0.7em 1em; }
+      #scoreboard { padding: 0.5em 0.7em; }
+      #battleMenu { flex-direction: column; gap: 0.5em; }
+    }
+    /* Move troop orders UI to bottom of screen */
+    #orderToggle {
+      position: fixed;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: 12vh;
+      width: fit-content;
+      z-index: 20;
+      background: rgba(255,255,255,0.95);
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.10);
+      padding: 0.7em 1.5em;
+    }
+  </style>
 </head>
 <body>
   <div id="ui">
+    <div id="phaseMsg" style="font-size:2em; margin-top:1em;"></div>
+    <div id="enemyChoice" style="font-size:1.2em; margin:0.5em 0;"></div>
     <div class="card-row" id="cardRow"></div>
-    <div id="promptContainer" class="prompt-container" style="display:none;"></div>
+
     <div id="scoreboard" style="display:none;"></div>
   </div>
   <canvas id="three-canvas"></canvas>
-  <script type="module" src="main.js"></script>
+  <script>
+// --- Game Data ---
+const GENERALS = [
+  {
+    name: 'Warrior',
+    hp: 120,
+    troops: 'melee',
+    color: 0xff5e62,
+    special: 'Battle Cry',
+    desc: 'High HP, melee troops.'
+  },
+  {
+    name: 'Archer',
+    hp: 90,
+    troops: 'ranged',
+    color: 0x1da1f2,
+    special: 'Volley',
+    desc: 'Low HP, long ranged troops.'
+  },
+  {
+    name: 'Mage',
+    hp: 70,
+    troops: 'magic',
+    color: 0x8e54e9,
+    special: 'Fireball',
+    desc: 'Medium HP, short range, fast damage.'
+  }
+];
+const FORMATIONS = [
+  {
+    name: 'Line',
+    bonus: {atk:1, def:1, speed:1},
+    desc: 'Balanced attack/defense/speed. Troops in a line.'
+  },
+  {
+    name: 'Wedge',
+    bonus: {atk:1.2, def:0.8, speed:1.3},
+    desc: 'High attack and speed, vulnerable flanks. V-shape.'
+  },
+  {
+    name: 'Square',
+    bonus: {atk:0.8, def:1.3, speed:0.7},
+    desc: 'High defense, low mobility. Tight grid formation.'
+  }
+];
+
+const ROUND_LIMIT = 3;
+
+// Add troop type data with range and rate of attack (cooldown in ticks)
+const TROOP_TYPES = {
+  melee:   { atk: 2,   hp: 6, range: 1, rate: 5 },   // 1 tick
+  ranged:  { atk: 1, hp: 2, range: 7, rate: 8 },   // 6 ticks (slower)
+  magic:   { atk: 1,   hp: 3, range: 3.5, rate: 3 }    // 3 ticks (medium)
+};
+
+// --- State ---
+let state = {
+  round: 1,
+  phase: 'setup', // setup, formation, battle, end
+  player: {},
+  enemy: {},
+  playerFormation: null,
+  enemyFormation: null,
+  playerHP: 0,
+  enemyHP: 0,
+  playerTroops: [],
+  enemyTroops: [],
+  playerScore: 0,
+  enemyScore: 0,
+  battleTimer: 0,
+  battleStart: 0,
+  audioOn: true,
+  scores: JSON.parse(localStorage.getItem('bf_scores')||'[]'),
+  playerOrder: 'advance', // 'advance', 'wait', 'retreat'
+  enemyOrder: 'advance',
+};
+
+// --- UI Elements ---
+const phaseMsg = document.getElementById('phaseMsg');
+const enemyChoice = document.getElementById('enemyChoice');
+const cardRow = document.getElementById('cardRow');
+
+const scoreboard = document.getElementById('scoreboard');
+const canvas = document.getElementById('three-canvas');
+
+// --- Three.js Setup ---
+let renderer, scene, camera, controls, troopMeshes = [], generalMeshes = [];
+function init3D() {
+  renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:true});
+  renderer.setClearColor(0x7ee8fa, 1);
+  resize3D();
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 100);
+  camera.position.set(0, 12, 18);
+  camera.lookAt(0,0,0);
+  // Light
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
+  scene.add(hemi);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.7);
+  dir.position.set(5,10,7);
+  scene.add(dir);
+  // Simple flat plane as battlefield
+  const plane = new THREE.Mesh(
+    new THREE.PlaneGeometry(20, 20),
+    new THREE.MeshLambertMaterial({color: 0x22ff22, side: THREE.DoubleSide})
+  );
+  plane.rotation.x = -Math.PI/2;
+  plane.position.y = 0;
+  scene.add(plane);
+  // Log scene contents
+  setTimeout(() => {
+    console.log('Scene children:', scene.children);
+  }, 1000);
+  // Add OrbitControls for camera rotation/zoom
+  if (typeof THREE.OrbitControls === 'undefined') {
+    console.warn('OrbitControls not loaded');
+  } else {
+    window.orbitControls = new THREE.OrbitControls(camera, renderer.domElement);
+    orbitControls.target.set(0, 0, 0);
+    orbitControls.update();
+  }
+}
+function resize3D() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer && renderer.setSize(w, h);
+  camera && (camera.aspect = w/h, camera.updateProjectionMatrix());
+}
+window.addEventListener('resize', resize3D);
+
+// --- Game Logic ---
+function startGame() {
+  state.round = 1;
+  state.playerScore = 0;
+  state.enemyScore = 0;
+  
+  // Ensure scoreboard is hidden when starting a new game
+  scoreboard.style.display = 'none';
+  cardRow.innerHTML = '';
+  
+  // Clear any existing order toggle
+  const orderToggle = document.getElementById('orderToggle');
+  if (orderToggle) {
+    orderToggle.remove();
+  }
+  
+  nextRound();
+}
+function nextRound() {
+  state.phase = 'setup';
+  state.player = {};
+  state.enemy = {};
+  state.playerFormation = null;
+  state.enemyFormation = null;
+  state.playerHP = 0;
+  state.enemyHP = 0;
+  state.playerTroops = [];
+  state.enemyTroops = [];
+  troopMeshes = [];
+  generalMeshes = [];
+  
+  // Ensure scoreboard is hidden
+  scoreboard.style.display = 'none';
+  cardRow.innerHTML = '';
+  
+  // Clear any existing order toggle
+  const orderToggle = document.getElementById('orderToggle');
+  if (orderToggle) {
+    orderToggle.remove();
+  }
+  
+  updateUI();
+  enemyChooseGeneral();
+}
+function enemyChooseGeneral() {
+  const idx = Math.floor(Math.random()*GENERALS.length);
+  state.enemy = {...GENERALS[idx]};
+  enemyChoice.textContent = `Enemy chose: ${state.enemy.name} (${state.enemy.desc})`;
+  phaseMsg.textContent = `Choose Your General! (Round ${state.round}/3)`;
+  showCards(GENERALS, g => {
+    state.player = {...g};
+    state.playerHP = g.hp;
+    state.enemyHP = state.enemy.hp;
+    enemyChooseFormation();
+  });
+}
+function enemyChooseFormation() {
+  const idx = Math.floor(Math.random()*FORMATIONS.length);
+  state.enemyFormation = {...FORMATIONS[idx]};
+  enemyChoice.textContent += ` | Formation: ${state.enemyFormation.name}`;
+  phaseMsg.textContent = `Choose Your Formation!`;
+  showCards(FORMATIONS, f => {
+    state.playerFormation = {...f};
+    phaseMsg.textContent = 'Battle Begins!';
+    setTimeout(startBattle, 800);
+  });
+}
+function showCards(arr, onSelect) {
+  cardRow.innerHTML = '';
+  arr.forEach((item,i) => {
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.tabIndex = 0;
+    
+    // Add stats display for formations
+    let statsText = '';
+    if (item.bonus) {
+      const stats = [];
+      if (item.bonus.atk !== 1) stats.push(`ATK: ${item.bonus.atk > 1 ? '+' : ''}${Math.round((item.bonus.atk-1)*100)}%`);
+      if (item.bonus.def !== 1) stats.push(`DEF: ${item.bonus.def > 1 ? '+' : ''}${Math.round((item.bonus.def-1)*100)}%`);
+      if (item.bonus.speed !== 1) stats.push(`SPD: ${item.bonus.speed > 1 ? '+' : ''}${Math.round((item.bonus.speed-1)*100)}%`);
+      if (stats.length > 0) {
+        statsText = `<br><small style="color:#666; font-size:0.8em;">${stats.join(' | ')}</small>`;
+      }
+    }
+    
+    div.innerHTML = `<b>${item.name}</b><br><small>${item.desc}</small>${statsText}`;
+    div.onclick = () => {
+      document.querySelectorAll('.card').forEach(c=>c.classList.remove('selected'));
+      div.classList.add('selected');
+      setTimeout(()=>onSelect(item), 300);
+    };
+    div.onkeydown = e => {
+      if(e.key==='Enter'||e.key===' ') div.click();
+    };
+    cardRow.appendChild(div);
+  });
+}
+function startBattle() {
+  state.phase = 'battle';
+  cardRow.innerHTML = '';
+  scoreboard.style.display = 'none';
+  phaseMsg.textContent = 'Battle!';
+  setupBattlefield();
+  state.battleStart = Date.now();
+  state.battleTimer = 0;
+  renderOrderToggle();
+}
+function setupBattlefield() {
+  // Remove old meshes
+  while(scene.children.length > 6) scene.remove(scene.children[scene.children.length-1]);
+  // Remove previous generals from scene (remove all objects with .isGeneral flag)
+  if (scene && scene.children) {
+    for (let i = scene.children.length - 1; i >= 0; i--) {
+      const obj = scene.children[i];
+      if (obj && obj.userData && obj.userData.isGeneral) {
+        scene.remove(obj);
+      }
+    }
+  }
+  generalMeshes = [];
+  troopMeshes = [];
+  // Generals
+  const genY = 0;
+  const playerGen = makeGeneralMesh(0x1da1f2, true); // blue
+  playerGen.position.set(0, genY, 6);
+  playerGen.scale.set(2, 2, 2); // Double the scale
+  playerGen.userData.isGeneral = true;
+  playerGen.userData.isPlayer = true;
+  scene.add(playerGen);
+  generalMeshes.push(playerGen);
+  const enemyGen = makeGeneralMesh(0xff5e62, false); // red
+  enemyGen.position.set(0, genY, -6);
+  enemyGen.scale.set(2, 2, 2); // Double the scale
+  enemyGen.userData.isGeneral = true;
+  enemyGen.userData.isPlayer = false;
+  scene.add(enemyGen);
+  generalMeshes.push(enemyGen);
+  // Troops
+  state.playerTroops = makeTroops(state.player.troops, state.playerFormation.name, true, 0x1da1f2); // blue
+  state.enemyTroops = makeTroops(state.enemy.troops, state.enemyFormation.name, false, 0xff5e62); // red
+  state.playerTroops.forEach(t=>{
+    t.mesh.position.y = 0;
+    scene.add(t.mesh);
+    troopMeshes.push(t);
+  });
+  state.enemyTroops.forEach(t=>{
+    t.mesh.position.y = 0;
+    scene.add(t.mesh);
+    troopMeshes.push(t);
+  });
+  // Log scene contents
+  setTimeout(() => {
+    console.log('Scene children:', scene.children);
+  }, 1000);
+}
+function makeGeneralMesh(color, isPlayer) {
+  // Procedural low-poly robot general, feet at y=0 in local space
+  const group = new THREE.Group();
+  const gray = 0x888888;
+  const dark = 0x222222;
+  const accent = 0x00e0ff;
+  // All parts are shifted up by +0.25 so feet are at y=0
+  const yShift = 0.25;
+  // Torso
+  const torso = new THREE.Mesh(
+    new THREE.BoxGeometry(0.5, 0.7, 0.32),
+    new THREE.MeshLambertMaterial({color})
+  );
+  torso.position.set(0, 0.35 + yShift, 0);
+  group.add(torso);
+  // Chest plate
+  const chest = new THREE.Mesh(
+    new THREE.BoxGeometry(0.36, 0.18, 0.34),
+    new THREE.MeshLambertMaterial({color: gray})
+  );
+  chest.position.set(0, 0.55 + yShift, 0);
+  group.add(chest);
+  // Head
+  const head = new THREE.Mesh(
+    new THREE.BoxGeometry(0.28, 0.22, 0.22),
+    new THREE.MeshLambertMaterial({color: gray})
+  );
+  head.position.set(0, 0.85 + yShift, 0);
+  group.add(head);
+  // Visor
+  const visor = new THREE.Mesh(
+    new THREE.BoxGeometry(0.22, 0.08, 0.03),
+    new THREE.MeshLambertMaterial({color: accent})
+  );
+  visor.position.set(0, 0.85 + yShift, 0.13);
+  group.add(visor);
+  // Antenna
+  const antenna = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.018, 0.018, 0.18, 6),
+    new THREE.MeshLambertMaterial({color: accent})
+  );
+  antenna.position.set(0, 1.01 + yShift, 0);
+  group.add(antenna);
+  const antennaTip = new THREE.Mesh(
+    new THREE.SphereGeometry(0.03, 6, 6),
+    new THREE.MeshLambertMaterial({color: accent})
+  );
+  antennaTip.position.set(0, 1.11 + yShift, 0);
+  group.add(antennaTip);
+  
+  // Crown base
+  const crown = new THREE.Mesh(
+    new THREE.BoxGeometry(0.32, 0.08, 0.25),
+    new THREE.MeshLambertMaterial({color: 0xFFD700})
+  );
+  crown.position.set(0, 0.96 + yShift, 0);
+  // Randomize rotation to make it tilted but avoid antenna clipping
+  crown.rotation.x = (Math.random() - 0.5) * 0.3; // Tilt forward/back
+  crown.rotation.z = (Math.random() - 0.5) * 0.4; // Tilt left/right
+  crown.rotation.y = (Math.random() - 0.5) * 0.2; // Slight rotation
+  group.add(crown);
+  
+  // Crown spikes/prongs
+  for (let i = 0; i < 5; i++) {
+    const spike = new THREE.Mesh(
+      new THREE.ConeGeometry(0.015, 0.06, 6),
+      new THREE.MeshLambertMaterial({color: 0xFFD700})
+    );
+    spike.position.set((i - 2) * 0.06, 1.02 + yShift, 0.15);
+    spike.rotation.x = Math.PI;
+    group.add(spike);
+    
+    // Spike jewel
+    const spikeJewel = new THREE.Mesh(
+      new THREE.SphereGeometry(0.008, 6, 6),
+      new THREE.MeshLambertMaterial({color: [0xFF0000, 0x00FFFF, 0xFF00FF, 0xFFFF00, 0xFF8800][i], emissive: [0xFF0000, 0x00FFFF, 0xFF00FF, 0xFFFF00, 0xFF8800][i], emissiveIntensity: 0.4})
+    );
+    spikeJewel.position.set((i - 2) * 0.06, 1.05 + yShift, 0.15);
+    group.add(spikeJewel);
+  }
+  
+  // Crown jewels (front row)
+  for (let i = 0; i < 3; i++) {
+    const jewel = new THREE.Mesh(
+      new THREE.SphereGeometry(0.02, 8, 8),
+      new THREE.MeshLambertMaterial({color: [0xFF0000, 0x00FF00, 0x0000FF][i], emissive: [0xFF0000, 0x00FF00, 0x0000FF][i], emissiveIntensity: 0.3})
+    );
+    jewel.position.set((i - 1) * 0.08, 1.0 + yShift, 0.15);
+    group.add(jewel);
+  }
+  
+  // Crown side decorations
+  for (let i = -1; i <= 1; i += 2) {
+    // Side gem
+    const sideGem = new THREE.Mesh(
+      new THREE.SphereGeometry(0.015, 8, 8),
+      new THREE.MeshLambertMaterial({color: 0xFFD700, emissive: 0xFFD700, emissiveIntensity: 0.2})
+    );
+    sideGem.position.set(0.15 * i, 1.0 + yShift, 0.08);
+    group.add(sideGem);
+    
+    // Side decorative ring
+    const sideRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.02, 0.005, 4, 8),
+      new THREE.MeshLambertMaterial({color: 0xFFD700})
+    );
+    sideRing.position.set(0.15 * i, 1.0 + yShift, 0.08);
+    sideRing.rotation.x = Math.PI / 2;
+    group.add(sideRing);
+  }
+  
+  // Crown back decorations
+  for (let i = 0; i < 3; i++) {
+    const backGem = new THREE.Mesh(
+      new THREE.SphereGeometry(0.012, 6, 6),
+      new THREE.MeshLambertMaterial({color: [0x800080, 0x008080, 0x808000][i], emissive: [0x800080, 0x008080, 0x808000][i], emissiveIntensity: 0.3})
+    );
+    backGem.position.set((i - 1) * 0.06, 1.0 + yShift, -0.15);
+    group.add(backGem);
+  }
+  
+  // Crown trim/band
+  const crownTrim = new THREE.Mesh(
+    new THREE.BoxGeometry(0.34, 0.02, 0.27),
+    new THREE.MeshLambertMaterial({color: 0xCCAA00})
+  );
+  crownTrim.position.set(0, 0.92 + yShift, 0);
+  crownTrim.rotation.x = crown.rotation.x;
+  crownTrim.rotation.z = crown.rotation.z;
+  crownTrim.rotation.y = crown.rotation.y;
+  group.add(crownTrim);
+  // Arms
+  for (let i = -1; i <= 1; i += 2) {
+    // Shoulder
+    const shoulder = new THREE.Mesh(
+      new THREE.SphereGeometry(0.07, 6, 6),
+      new THREE.MeshLambertMaterial({color: gray})
+    );
+    shoulder.position.set(0.28 * i, 0.68 + yShift, 0);
+    group.add(shoulder);
+    // Upper arm
+    const upper = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.04, 0.04, 0.22, 6),
+      new THREE.MeshLambertMaterial({color: color})
+    );
+    upper.position.set(0.28 * i, 0.54 + yShift, 0);
+    upper.rotation.z = Math.PI / 2.5 * i;
+    group.add(upper);
+    // Elbow
+    const elbow = new THREE.Mesh(
+      new THREE.SphereGeometry(0.045, 6, 6),
+      new THREE.MeshLambertMaterial({color: dark})
+    );
+    elbow.position.set(0.38 * i, 0.44 + yShift, 0);
+    group.add(elbow);
+    // Forearm
+    const fore = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.035, 0.035, 0.18, 6),
+      new THREE.MeshLambertMaterial({color: gray})
+    );
+    fore.position.set(0.44 * i, 0.34 + yShift, 0);
+    fore.rotation.z = Math.PI / 2.5 * i;
+    group.add(fore);
+    // Hand (claw)
+    const hand = new THREE.Mesh(
+      new THREE.BoxGeometry(0.07, 0.04, 0.09),
+      new THREE.MeshLambertMaterial({color: dark})
+    );
+    hand.position.set(0.52 * i, 0.26 + yShift, 0);
+    group.add(hand);
+    // Fingers
+    for (let f = -1; f <= 1; f += 2) {
+      const finger = new THREE.Mesh(
+        new THREE.BoxGeometry(0.03, 0.02, 0.04),
+        new THREE.MeshLambertMaterial({color: accent})
+      );
+      finger.position.set(0.54 * i, 0.24 + yShift, 0.02 * f);
+      group.add(finger);
+    }
+  }
+  // Legs
+  for (let i = -1; i <= 1; i += 2) {
+    // Hip
+    const hip = new THREE.Mesh(
+      new THREE.SphereGeometry(0.07, 6, 6),
+      new THREE.MeshLambertMaterial({color: gray})
+    );
+    hip.position.set(0.13 * i, 0.13 + yShift, 0);
+    group.add(hip);
+    // Thigh
+    const thigh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.05, 0.22, 6),
+      new THREE.MeshLambertMaterial({color: color})
+    );
+    thigh.position.set(0.13 * i, 0.01 + yShift, 0);
+    thigh.rotation.z = Math.PI / 2.5 * i;
+    group.add(thigh);
+    // Knee
+    const knee = new THREE.Mesh(
+      new THREE.SphereGeometry(0.045, 6, 6),
+      new THREE.MeshLambertMaterial({color: dark})
+    );
+    knee.position.set(0.22 * i, -0.09 + yShift, 0);
+    group.add(knee);
+    // Shin
+    const shin = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.04, 0.04, 0.16, 6),
+      new THREE.MeshLambertMaterial({color: gray})
+    );
+    shin.position.set(0.26 * i, -0.17 + yShift, 0);
+    shin.rotation.z = Math.PI / 2.5 * i;
+    group.add(shin);
+    // Foot
+    const foot = new THREE.Mesh(
+      new THREE.BoxGeometry(0.09, 0.04, 0.13),
+      new THREE.MeshLambertMaterial({color: dark})
+    );
+    foot.position.set(0.32 * i, -0.25 + yShift, 0.03);
+    group.add(foot);
+    // Toes
+    for (let t = -1; t <= 1; t += 2) {
+      const toe = new THREE.Mesh(
+        new THREE.BoxGeometry(0.03, 0.02, 0.04),
+        new THREE.MeshLambertMaterial({color: accent})
+      );
+      toe.position.set(0.34 * i, -0.27 + yShift, 0.06 * t);
+      group.add(toe);
+    }
+  }
+  // Bolts/details
+  for (let i = 0; i < 4; i++) {
+    const bolt = new THREE.Mesh(
+      new THREE.SphereGeometry(0.018, 6, 6),
+      new THREE.MeshLambertMaterial({color: dark})
+    );
+    bolt.position.set(Math.cos(i * Math.PI / 2) * 0.18, 0.35 + yShift, Math.sin(i * Math.PI / 2) * 0.13);
+    group.add(bolt);
+  }
+  return group;
+}
+
+function makeTroopMesh(type, isPlayer, troopColor) {
+  const group = new THREE.Group();
+  const color = troopColor !== undefined ? troopColor : (isPlayer ? 0x1da1f2 : 0xff5e62);
+  const gray = 0x888888;
+  const dark = 0x222222;
+  const accent = 0x00e0ff;
+  
+  if (type === 'melee') {
+    // Robot Warrior - similar to general but smaller and different
+    // Body
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(0.4, 0.5, 0.25),
+      new THREE.MeshLambertMaterial({color})
+    );
+    body.position.y = 0.25;
+    group.add(body);
+    
+    // Chest plate
+    const chest = new THREE.Mesh(
+      new THREE.BoxGeometry(0.28, 0.12, 0.26),
+      new THREE.MeshLambertMaterial({color: gray})
+    );
+    chest.position.y = 0.4;
+    group.add(chest);
+    
+    // Head
+    const head = new THREE.Mesh(
+      new THREE.BoxGeometry(0.2, 0.15, 0.15),
+      new THREE.MeshLambertMaterial({color: gray})
+    );
+    head.position.y = 0.65;
+    group.add(head);
+    
+    // Visor
+    const visor = new THREE.Mesh(
+      new THREE.BoxGeometry(0.15, 0.05, 0.02),
+      new THREE.MeshLambertMaterial({color: accent})
+    );
+    visor.position.set(0, 0.65, 0.09);
+    group.add(visor);
+    
+    // Arms
+    for (let i = -1; i <= 1; i += 2) {
+      // Shoulder
+      const shoulder = new THREE.Mesh(
+        new THREE.SphereGeometry(0.05, 6, 6),
+        new THREE.MeshLambertMaterial({color: gray})
+      );
+      shoulder.position.set(0.22 * i, 0.5, 0);
+      group.add(shoulder);
+      
+      // Upper arm
+      const upper = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.03, 0.03, 0.15, 6),
+        new THREE.MeshLambertMaterial({color: color})
+      );
+      upper.position.set(0.22 * i, 0.4, 0);
+      upper.rotation.z = Math.PI / 3 * i;
+      group.add(upper);
+      
+      // Forearm
+      const fore = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.025, 0.025, 0.12, 6),
+        new THREE.MeshLambertMaterial({color: gray})
+      );
+      fore.position.set(0.28 * i, 0.32, 0);
+      fore.rotation.z = Math.PI / 3 * i;
+      group.add(fore);
+      
+      // Hand
+      const hand = new THREE.Mesh(
+        new THREE.BoxGeometry(0.05, 0.03, 0.06),
+        new THREE.MeshLambertMaterial({color: dark})
+      );
+      hand.position.set(0.32 * i, 0.26, 0);
+      group.add(hand);
+    }
+    
+    // Sword (right hand)
+    const sword = new THREE.Mesh(
+      new THREE.BoxGeometry(0.015, 0.015, 0.25),
+      new THREE.MeshLambertMaterial({color: 0xC0C0C0})
+    );
+    sword.position.set(0.4, 0.26, 0.15);
+    sword.rotation.x = -0.3;
+    group.add(sword);
+    
+    // Shield (left hand)
+    const shield = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.08, 0.08, 0.03, 6),
+      new THREE.MeshLambertMaterial({color: dark})
+    );
+    shield.position.set(-0.35, 0.26, 0);
+    shield.rotation.x = Math.PI / 2;
+    group.add(shield);
+    
+    // Legs
+    for (let i = -1; i <= 1; i += 2) {
+      // Hip
+      const hip = new THREE.Mesh(
+        new THREE.SphereGeometry(0.05, 6, 6),
+        new THREE.MeshLambertMaterial({color: gray})
+      );
+      hip.position.set(0.1 * i, 0.1, 0);
+      group.add(hip);
+      
+      // Thigh
+      const thigh = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.04, 0.04, 0.15, 6),
+        new THREE.MeshLambertMaterial({color: color})
+      );
+      thigh.position.set(0.1 * i, 0.025, 0);
+      thigh.rotation.z = Math.PI / 4 * i;
+      group.add(thigh);
+      
+      // Shin
+      const shin = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.03, 0.03, 0.12, 6),
+        new THREE.MeshLambertMaterial({color: gray})
+      );
+      shin.position.set(0.15 * i, -0.06, 0);
+      shin.rotation.z = Math.PI / 4 * i;
+      group.add(shin);
+      
+      // Foot
+      const foot = new THREE.Mesh(
+        new THREE.BoxGeometry(0.06, 0.03, 0.08),
+        new THREE.MeshLambertMaterial({color: dark})
+      );
+      foot.position.set(0.18 * i, -0.12, 0.02);
+      group.add(foot);
+    }
+    
+  } else if (type === 'ranged') {
+    // Robot Sniper with gun
+    // Body
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(0.35, 0.45, 0.2),
+      new THREE.MeshLambertMaterial({color})
+    );
+    body.position.y = 0.225;
+    group.add(body);
+    
+    // Chest plate
+    const chest = new THREE.Mesh(
+      new THREE.BoxGeometry(0.25, 0.1, 0.21),
+      new THREE.MeshLambertMaterial({color: gray})
+    );
+    chest.position.y = 0.35;
+    group.add(chest);
+    
+    // Head
+    const head = new THREE.Mesh(
+      new THREE.BoxGeometry(0.18, 0.12, 0.12),
+      new THREE.MeshLambertMaterial({color: gray})
+    );
+    head.position.y = 0.57;
+    group.add(head);
+    
+    // Scope
+    const scope = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.03, 0.03, 0.08, 6),
+      new THREE.MeshLambertMaterial({color: dark})
+    );
+    scope.position.set(0, 0.57, 0.1);
+    scope.rotation.x = Math.PI / 2;
+    group.add(scope);
+    
+    // Arms
+    for (let i = -1; i <= 1; i += 2) {
+      // Shoulder
+      const shoulder = new THREE.Mesh(
+        new THREE.SphereGeometry(0.04, 6, 6),
+        new THREE.MeshLambertMaterial({color: gray})
+      );
+      shoulder.position.set(0.2 * i, 0.4, 0);
+      group.add(shoulder);
+      
+      // Upper arm
+      const upper = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.025, 0.025, 0.12, 6),
+        new THREE.MeshLambertMaterial({color: color})
+      );
+      upper.position.set(0.2 * i, 0.32, 0);
+      upper.rotation.z = Math.PI / 3 * i;
+      group.add(upper);
+      
+      // Forearm
+      const fore = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.02, 0.02, 0.1, 6),
+        new THREE.MeshLambertMaterial({color: gray})
+      );
+      fore.position.set(0.25 * i, 0.25, 0);
+      fore.rotation.z = Math.PI / 3 * i;
+      group.add(fore);
+    }
+    
+    // Gun (right arm)
+    const gun = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.02, 0.02, 0.3, 6),
+      new THREE.MeshLambertMaterial({color: dark})
+    );
+    gun.position.set(0.35, 0.25, 0.15);
+    gun.rotation.x = -0.2;
+    group.add(gun);
+    
+    // Gun barrel
+    const barrel = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.015, 0.015, 0.15, 6),
+      new THREE.MeshLambertMaterial({color: 0x444444})
+    );
+    barrel.position.set(0.5, 0.25, 0.15);
+    barrel.rotation.x = -0.2;
+    group.add(barrel);
+    
+    // Gun grip
+    const grip = new THREE.Mesh(
+      new THREE.BoxGeometry(0.02, 0.06, 0.02),
+      new THREE.MeshLambertMaterial({color: dark})
+    );
+    grip.position.set(0.35, 0.18, 0.15);
+    group.add(grip);
+    
+    // Legs
+    for (let i = -1; i <= 1; i += 2) {
+      // Hip
+      const hip = new THREE.Mesh(
+        new THREE.SphereGeometry(0.04, 6, 6),
+        new THREE.MeshLambertMaterial({color: gray})
+      );
+      hip.position.set(0.08 * i, 0.08, 0);
+      group.add(hip);
+      
+      // Thigh
+      const thigh = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.035, 0.035, 0.12, 6),
+        new THREE.MeshLambertMaterial({color: color})
+      );
+      thigh.position.set(0.08 * i, 0.02, 0);
+      thigh.rotation.z = Math.PI / 4 * i;
+      group.add(thigh);
+      
+      // Shin
+      const shin = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.025, 0.025, 0.1, 6),
+        new THREE.MeshLambertMaterial({color: gray})
+      );
+      shin.position.set(0.12 * i, -0.03, 0);
+      shin.rotation.z = Math.PI / 4 * i;
+      group.add(shin);
+      
+      // Foot
+      const foot = new THREE.Mesh(
+        new THREE.BoxGeometry(0.05, 0.025, 0.07),
+        new THREE.MeshLambertMaterial({color: dark})
+      );
+      foot.position.set(0.15 * i, -0.08, 0.015);
+      group.add(foot);
+    }
+    
+  } else if (type === 'magic') {
+    // Robot Mage with lightning antenna
+    // Body
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(0.3, 0.4, 0.18),
+      new THREE.MeshLambertMaterial({color})
+    );
+    body.position.y = 0.2;
+    group.add(body);
+    
+    // Chest plate
+    const chest = new THREE.Mesh(
+      new THREE.BoxGeometry(0.22, 0.08, 0.19),
+      new THREE.MeshLambertMaterial({color: gray})
+    );
+    chest.position.y = 0.3;
+    group.add(chest);
+    
+    // Head
+    const head = new THREE.Mesh(
+      new THREE.BoxGeometry(0.16, 0.1, 0.1),
+      new THREE.MeshLambertMaterial({color: gray})
+    );
+    head.position.y = 0.5;
+    group.add(head);
+    
+    // Visor
+    const visor = new THREE.Mesh(
+      new THREE.BoxGeometry(0.12, 0.04, 0.01),
+      new THREE.MeshLambertMaterial({color: accent})
+    );
+    visor.position.set(0, 0.5, 0.06);
+    group.add(visor);
+    
+    // Lightning antenna
+    const antenna = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.015, 0.015, 0.2, 6),
+      new THREE.MeshLambertMaterial({color: accent})
+    );
+    antenna.position.set(0, 0.6, 0);
+    group.add(antenna);
+    
+    // Antenna tip (lightning emitter)
+    const antennaTip = new THREE.Mesh(
+      new THREE.SphereGeometry(0.025, 8, 8),
+      new THREE.MeshLambertMaterial({color: accent, emissive: accent, emissiveIntensity: 0.5})
+    );
+    antennaTip.position.set(0, 0.7, 0);
+    group.add(antennaTip);
+    
+    // Energy core
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(0.03, 8, 8),
+      new THREE.MeshLambertMaterial({color: accent, emissive: accent, emissiveIntensity: 0.3})
+    );
+    core.position.set(0, 0.2, 0.1);
+    group.add(core);
+    
+    // Legs
+    for (let i = -1; i <= 1; i += 2) {
+      // Hip
+      const hip = new THREE.Mesh(
+        new THREE.SphereGeometry(0.035, 6, 6),
+        new THREE.MeshLambertMaterial({color: gray})
+      );
+      hip.position.set(0.07 * i, 0.07, 0);
+      group.add(hip);
+      
+      // Thigh
+      const thigh = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.03, 0.03, 0.1, 6),
+        new THREE.MeshLambertMaterial({color: color})
+      );
+      thigh.position.set(0.07 * i, 0.02, 0);
+      thigh.rotation.z = Math.PI / 4 * i;
+      group.add(thigh);
+      
+      // Shin
+      const shin = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.025, 0.025, 0.08, 6),
+        new THREE.MeshLambertMaterial({color: gray})
+      );
+      shin.position.set(0.1 * i, -0.02, 0);
+      shin.rotation.z = Math.PI / 4 * i;
+      group.add(shin);
+      
+      // Foot
+      const foot = new THREE.Mesh(
+        new THREE.BoxGeometry(0.045, 0.02, 0.06),
+        new THREE.MeshLambertMaterial({color: dark})
+      );
+      foot.position.set(0.12 * i, -0.06, 0.01);
+      group.add(foot);
+    }
+  }
+  
+  return group;
+}
+
+function makeTroops(type, formation, isPlayer, troopColor) {
+  // 7 troops per side
+  let troops = [];
+  let color = troopColor !== undefined ? troopColor : (isPlayer ? 0x1da1f2 : 0xff5e62);
+  let zBase = isPlayer ? 4 : -4;
+  let xBase = 0;
+  let positions = [];
+  if(formation==='Line') {
+    for(let i=0;i<7;i++) positions.push([xBase-3+i,0,zBase]);
+  } else if(formation==='Wedge') {
+    for(let i=0;i<7;i++) positions.push([xBase-3+i,0,zBase+Math.abs(i-3)*0.7*(isPlayer?1:-1)]);
+  } else if(formation==='Square') {
+    for(let i=0;i<7;i++) positions.push([xBase-1.5+(i%3)*1.5,0,zBase+(Math.floor(i/3))*1.2*(isPlayer?1:-1)]);
+  }
+  for(let i=0;i<7;i++) {
+    let mesh = makeTroopMesh(type, isPlayer, color);
+    mesh.position.set(...positions[i]);
+    const troopType = TROOP_TYPES[type];
+    mesh.userData = {
+      hp: troopType.hp,
+      atk: troopType.atk,
+      range: troopType.range,
+      rate: troopType.rate,
+      cooldown: 0,
+      alive: true,
+      isPlayer,
+      idx: i,
+      startX: positions[i][0],
+      startZ: positions[i][2],
+      shootPause: 0,
+      troopColor: color,
+    };
+    troops.push({mesh, ...mesh.userData});
+  }
+  return troops;
+}
+
+
+// Function to update general rotations to face closest enemy troop
+function updateGeneralRotations() {
+  if (state.phase !== 'battle' || generalMeshes.length < 2) return;
+  
+  const playerGen = generalMeshes[0];
+  const enemyGen = generalMeshes[1];
+  
+  // Find closest enemy troop for player general
+  let closestEnemyTroop = null;
+  let closestDistance = Infinity;
+  
+  state.enemyTroops.forEach(troop => {
+    if (troop.mesh.userData.alive) {
+      const dx = troop.mesh.position.x - playerGen.position.x;
+      const dz = troop.mesh.position.z - playerGen.position.z;
+      const distance = Math.sqrt(dx * dx + dz * dz);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestEnemyTroop = troop;
+      }
+    }
+  });
+  
+  // If no enemy troops, face the enemy general
+  if (!closestEnemyTroop) {
+    const dx = enemyGen.position.x - playerGen.position.x;
+    const dz = enemyGen.position.z - playerGen.position.z;
+    const angle = Math.atan2(dx, dz);
+    playerGen.rotation.y = angle;
+  } else {
+    const dx = closestEnemyTroop.mesh.position.x - playerGen.position.x;
+    const dz = closestEnemyTroop.mesh.position.z - playerGen.position.z;
+    const angle = Math.atan2(dx, dz);
+    playerGen.rotation.y = angle;
+  }
+  
+  // Find closest player troop for enemy general
+  let closestPlayerTroop = null;
+  closestDistance = Infinity;
+  
+  state.playerTroops.forEach(troop => {
+    if (troop.mesh.userData.alive) {
+      const dx = troop.mesh.position.x - enemyGen.position.x;
+      const dz = troop.mesh.position.z - enemyGen.position.z;
+      const distance = Math.sqrt(dx * dx + dz * dz);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestPlayerTroop = troop;
+      }
+    }
+  });
+  
+  // If no player troops, face the player general
+  if (!closestPlayerTroop) {
+    const dx = playerGen.position.x - enemyGen.position.x;
+    const dz = playerGen.position.z - enemyGen.position.z;
+    const angle = Math.atan2(dx, dz);
+    enemyGen.rotation.y = angle;
+  } else {
+    const dx = closestPlayerTroop.mesh.position.x - enemyGen.position.x;
+    const dz = closestPlayerTroop.mesh.position.z - enemyGen.position.z;
+    const angle = Math.atan2(dx, dz);
+    enemyGen.rotation.y = angle;
+  }
+}
+
+// --- Battle Loop ---
+let lastFrame = 0;
+function animate(ts) {
+  requestAnimationFrame(animate);
+  if(!renderer) return;
+  // Camera shake removed - generals will shake instead
+  renderer.render(scene, camera);
+  // Billboard general sprites
+  generalMeshes.forEach(g => {
+    if (g.children[0]) {
+      const plane = g.children[0];
+      const camPos = camera.position.clone();
+      camPos.y = plane.getWorldPosition(new THREE.Vector3()).y; // lock Y
+      plane.lookAt(camPos);
+    }
+  });
+  // Animate troops
+  troopMeshes.forEach(t => {
+    if(t.mesh.userData.alive) t.mesh.rotation.x = Math.sin(Date.now()/200+t.mesh.userData.idx)*0.1;
+    // Smoothly interpolate Y rotation toward targetY
+    if (typeof t.mesh.userData.targetY === 'number') {
+      let cur = t.mesh.rotation.y;
+      let target = t.mesh.userData.targetY;
+      // Shortest angle interpolation
+      let delta = ((target - cur + Math.PI) % (2 * Math.PI)) - Math.PI;
+      t.mesh.rotation.y += delta * 0.18;
+    }
+    // Animate damage flash effects
+    if (t.mesh.userData.damageFlashStart) {
+      const now = performance.now();
+      const elapsed = now - t.mesh.userData.damageFlashStart;
+      const flashT = Math.min(1, elapsed / t.mesh.userData.damageFlashDuration);
+      
+      if (flashT < 1) {
+        // Flash white during damage
+        t.mesh.traverse((child) => {
+          if (child.material && child.material.color) {
+            if (!child.userData.originalColor) {
+              child.userData.originalColor = child.material.color.clone();
+            }
+            // Flash to white
+            child.material.color.setHex(0xffffff);
+          }
+        });
+      } else {
+        // Restore original colors
+        t.mesh.traverse((child) => {
+          if (child.material && child.material.color && child.userData.originalColor) {
+            child.material.color.copy(child.userData.originalColor);
+          }
+        });
+        delete t.mesh.userData.damageFlashStart;
+        delete t.mesh.userData.damageFlashDuration;
+      }
+    }
+  });
+  
+  // Update general rotations to face closest enemy troop
+  updateGeneralRotations();
+  // Battle logic
+  if(state.phase==='battle') {
+    let now = Date.now();
+    if(now-lastFrame > 250) { // 4 ticks/sec
+      battleTick();
+      lastFrame = now;
+    }
+  }
+  animateDeathEffects();
+  animateGeneralDamageEffects();
+  animateGeneralDeathEffects();
+  animateTroopDeathEffects();
+}
+function battleTick() {
+  // Troops auto-attack
+  let pAlive = state.playerTroops.filter(t=>t.mesh.userData.alive);
+  let eAlive = state.enemyTroops.filter(t=>t.mesh.userData.alive);
+  // Enemy AI: set enemyOrder based on battle state
+  let playerTroopCount = pAlive.length;
+  let enemyTroopCount = eAlive.length;
+  if (state.enemyHP < 30 || enemyTroopCount < 3) {
+    state.enemyOrder = 'retreat';
+  } else if (enemyTroopCount < playerTroopCount) {
+    state.enemyOrder = 'wait';
+  } else {
+    state.enemyOrder = 'advance';
+  }
+  // Decrement cooldowns
+  pAlive.forEach(t => { if(t.mesh.userData.cooldown>0) t.mesh.userData.cooldown--; if(t.mesh.userData.shootPause>0) t.mesh.userData.shootPause--; });
+  eAlive.forEach(t => { if(t.mesh.userData.cooldown>0) t.mesh.userData.cooldown--; if(t.mesh.userData.shootPause>0) t.mesh.userData.shootPause--; });
+  // Each troop attacks random enemy troop
+  pAlive.forEach(t => {
+    let aliveEnemies = state.enemyTroops.filter(et=>et.mesh.userData.alive);
+    let target = null;
+    if(aliveEnemies.length > 0) {
+      target = aliveEnemies[Math.floor(Math.random()*aliveEnemies.length)];
+    } else {
+      // If no enemy troops, target the enemy general
+      target = { mesh: generalMeshes[1], userData: { hp: state.enemyHP, alive: state.enemyHP > 0, isGeneral: true } };
+    }
+    if(target) {
+      if(t.mesh.userData.shootPause > 0) return;
+      // Retreat: move to starting position, cannot attack
+      if(state.playerOrder === 'retreat' && target !== generalMeshes[1]) {
+        const dx = t.mesh.userData.startX - t.mesh.position.x;
+        const dz = t.mesh.userData.startZ - t.mesh.position.z;
+        const dist = Math.sqrt(dx*dx + dz*dz);
+        if(dist > 0.05) {
+          const baseStep = 0.5;
+          const step = baseStep * state.playerFormation.bonus.speed;
+          const nx = t.mesh.position.x + (dx/dist)*Math.min(step, dist);
+          const nz = t.mesh.position.z + (dz/dist)*Math.min(step, dist);
+          t.mesh.position.x = nx;
+          t.mesh.position.z = nz;
+          // Rotate troop to face target
+          const angle = Math.atan2(target.mesh.position.x - t.mesh.position.x, target.mesh.position.z - t.mesh.position.z);
+          t.mesh.userData.targetY = angle;
+        }
+        return; // cannot attack while retreating
+      }
+      // Wait: do not move, but can attack if in range
+      if(state.playerOrder === 'wait') {
+        // Only attack if in range and not moving
+        const dx = target.mesh.position.x - t.mesh.position.x;
+        const dz = target.mesh.position.z - t.mesh.position.z;
+        const dist = Math.sqrt(dx*dx + dz*dz);
+        if(dist <= t.mesh.userData.range && t.mesh.userData.cooldown === 0) {
+          if(state.player.troops === 'melee') {
+            let dmg = t.atk * state.playerFormation.bonus.atk;
+            let dmgTaken = dmg;
+            // If enemy is waiting, take 50% reduced damage
+            if(state.enemyOrder === 'wait') dmgTaken *= 0.5;
+            if(isGeneralTarget(target, generalMeshes[1])) {
+              if (state.enemyHP > 0) {
+                state.enemyHP -= dmgTaken;
+                triggerGeneralDamageEffect(1);
+              }
+            } else {
+              target.mesh.userData.hp -= dmgTaken;
+              triggerTroopDamageFlash(target.mesh);
+              if(target.mesh.userData.hp<=0) target.mesh.userData.alive = false;
+            }
+            t.mesh.userData.cooldown = t.mesh.userData.rate;
+            t.mesh.userData.shootPause = 1;
+          } else if(state.player.troops === 'ranged' || state.player.troops === 'magic') {
+            if(isGeneralTarget(target, generalMeshes[1])) {
+              spawnProjectile(t.mesh.position, target.mesh.position, t.atk * state.playerFormation.bonus.atk, null, t.mesh.userData.isPlayer, true);
+              t.mesh.userData.cooldown = t.mesh.userData.rate;
+              t.mesh.userData.shootPause = 1;
+            } else {
+              spawnProjectile(t.mesh.position, target.mesh.position, t.atk * state.playerFormation.bonus.atk, target, t.mesh.userData.isPlayer);
+              t.mesh.userData.cooldown = t.mesh.userData.rate;
+              t.mesh.userData.shootPause = 1;
+            }
+          }
+        }
+        return;
+      }
+      // Advance: all troop types move toward target if out of range, attack if in range
+      const dx = target.mesh.position.x - t.mesh.position.x;
+      const dz = target.mesh.position.z - t.mesh.position.z;
+      const dist = Math.sqrt(dx*dx + dz*dz);
+      if(t.mesh.userData.shootPause > 0) return;
+      
+      // Always rotate troop to face target
+      const angle = Math.atan2(target.mesh.position.x - t.mesh.position.x, target.mesh.position.z - t.mesh.position.z);
+      t.mesh.userData.targetY = angle;
+      
+      if(dist > t.mesh.userData.range) {
+        // Move toward target (including general)
+        const baseStep = 0.5;
+        const step = baseStep * state.playerFormation.bonus.speed;
+        const nx = t.mesh.position.x + (dx/dist)*Math.min(step, dist-t.mesh.userData.range);
+        const nz = t.mesh.position.z + (dz/dist)*Math.min(step, dist-t.mesh.userData.range);
+        t.mesh.position.x = nx;
+        t.mesh.position.z = nz;
+      } else if(t.mesh.userData.cooldown === 0 && dist <= t.mesh.userData.range) {
+        // Attack if in range and cooldown is ready
+        if(state.player.troops === 'melee') {
+          let dmg = t.atk * state.playerFormation.bonus.atk;
+          let dmgTaken = dmg;
+          // If enemy is waiting, take 50% reduced damage
+          if(state.enemyOrder === 'wait') dmgTaken *= 0.5;
+          if(isGeneralTarget(target, generalMeshes[1])) {
+            if (state.enemyHP > 0) {
+              state.enemyHP -= dmgTaken;
+              triggerGeneralDamageEffect(1);
+            }
+          } else {
+            target.mesh.userData.hp -= dmgTaken;
+            triggerTroopDamageFlash(target.mesh);
+            if(target.mesh.userData.hp<=0) target.mesh.userData.alive = false;
+          }
+          t.mesh.userData.cooldown = t.mesh.userData.rate;
+          t.mesh.userData.shootPause = 1;
+        } else if(state.player.troops === 'ranged' || state.player.troops === 'magic') {
+          if(isGeneralTarget(target, generalMeshes[1])) {
+            spawnProjectile(t.mesh.position, target.mesh.position, t.atk * state.playerFormation.bonus.atk, null, t.mesh.userData.isPlayer, true);
+            t.mesh.userData.cooldown = t.mesh.userData.rate;
+            t.mesh.userData.shootPause = 1;
+          } else {
+            spawnProjectile(t.mesh.position, target.mesh.position, t.atk * state.playerFormation.bonus.atk, target, t.mesh.userData.isPlayer);
+            t.mesh.userData.cooldown = t.mesh.userData.rate;
+            t.mesh.userData.shootPause = 1;
+          }
+        }
+      }
+    }
+  });
+  eAlive.forEach(t => {
+    let aliveEnemies = state.playerTroops.filter(pt=>pt.mesh.userData.alive);
+    let target = null;
+    if(aliveEnemies.length > 0) {
+      target = aliveEnemies[Math.floor(Math.random()*aliveEnemies.length)];
+    } else {
+      // If no player troops, target the player general
+      target = { mesh: generalMeshes[0], userData: { hp: state.playerHP, alive: state.playerHP > 0, isGeneral: true } };
+    }
+    if(target) {
+      if(t.mesh.userData.shootPause > 0) return;
+      // Retreat: move to starting position, cannot attack
+      if(state.enemyOrder === 'retreat' && target !== generalMeshes[0]) {
+        const dx = t.mesh.userData.startX - t.mesh.position.x;
+        const dz = t.mesh.userData.startZ - t.mesh.position.z;
+        const dist = Math.sqrt(dx*dx + dz*dz);
+        if(dist > 0.05) {
+          const baseStep = 0.5;
+          const step = baseStep * state.enemyFormation.bonus.speed;
+          const nx = t.mesh.position.x + (dx/dist)*Math.min(step, dist);
+          const nz = t.mesh.position.z + (dz/dist)*Math.min(step, dist);
+          t.mesh.position.x = nx;
+          t.mesh.position.z = nz;
+          // Rotate troop to face target
+          const angle = Math.atan2(target.mesh.position.x - t.mesh.position.x, target.mesh.position.z - t.mesh.position.z);
+          t.mesh.userData.targetY = angle;
+        }
+        return; // cannot attack while retreating
+      }
+      // Wait: do not move, but can attack if in range
+      if(state.enemyOrder === 'wait') {
+        // Only attack if in range and not moving
+        const dx = target.mesh.position.x - t.mesh.position.x;
+        const dz = target.mesh.position.z - t.mesh.position.z;
+        const dist = Math.sqrt(dx*dx + dz*dz);
+        if(dist <= t.mesh.userData.range && t.mesh.userData.cooldown === 0) {
+          if(state.enemy.troops === 'melee') {
+            let dmg = t.atk * state.enemyFormation.bonus.atk;
+            let dmgTaken = dmg;
+            // If player is waiting, take 50% reduced damage
+            if(state.playerOrder === 'wait') dmgTaken *= 0.5;
+            if(isGeneralTarget(target, generalMeshes[0])) {
+              if (state.playerHP > 0) {
+                state.playerHP -= dmgTaken;
+                triggerGeneralDamageEffect(0);
+              }
+            } else {
+              target.mesh.userData.hp -= dmgTaken;
+              triggerTroopDamageFlash(target.mesh);
+              if(target.mesh.userData.hp<=0) target.mesh.userData.alive = false;
+            }
+            t.mesh.userData.cooldown = t.mesh.userData.rate;
+            t.mesh.userData.shootPause = 1;
+          } else if(state.enemy.troops === 'ranged' || state.enemy.troops === 'magic') {
+            if(isGeneralTarget(target, generalMeshes[0])) {
+              spawnProjectile(t.mesh.position, target.mesh.position, t.atk * state.enemyFormation.bonus.atk, null, t.mesh.userData.isPlayer, true);
+              t.mesh.userData.cooldown = t.mesh.userData.rate;
+              t.mesh.userData.shootPause = 1;
+            } else {
+              spawnProjectile(t.mesh.position, target.mesh.position, t.atk * state.enemyFormation.bonus.atk, target, t.mesh.userData.isPlayer);
+              t.mesh.userData.cooldown = t.mesh.userData.rate;
+              t.mesh.userData.shootPause = 1;
+            }
+          }
+        }
+        return;
+      }
+      // Advance: all troop types move toward target if out of range, attack if in range
+      const dx = target.mesh.position.x - t.mesh.position.x;
+      const dz = target.mesh.position.z - t.mesh.position.z;
+      const dist = Math.sqrt(dx*dx + dz*dz);
+      if(t.mesh.userData.shootPause > 0) return;
+      
+      // Always rotate troop to face target
+      const angle = Math.atan2(target.mesh.position.x - t.mesh.position.x, target.mesh.position.z - t.mesh.position.z);
+      t.mesh.userData.targetY = angle;
+      
+      if(dist > t.mesh.userData.range) {
+        // Move toward target (including general)
+        const baseStep = 0.5;
+        const step = baseStep * state.enemyFormation.bonus.speed;
+        const nx = t.mesh.position.x + (dx/dist)*Math.min(step, dist-t.mesh.userData.range);
+        const nz = t.mesh.position.z + (dz/dist)*Math.min(step, dist-t.mesh.userData.range);
+        t.mesh.position.x = nx;
+        t.mesh.position.z = nz;
+      } else if(t.mesh.userData.cooldown === 0 && dist <= t.mesh.userData.range) {
+        // Attack if in range and cooldown is ready
+        if(state.enemy.troops === 'melee') {
+          let dmg = t.atk * state.enemyFormation.bonus.atk;
+          let dmgTaken = dmg;
+          // If player is waiting, take 50% reduced damage
+          if(state.playerOrder === 'wait') dmgTaken *= 0.5;
+          if(isGeneralTarget(target, generalMeshes[0])) {
+            if (state.playerHP > 0) {
+              state.playerHP -= dmgTaken;
+              triggerGeneralDamageEffect(0);
+            }
+          } else {
+            target.mesh.userData.hp -= dmgTaken;
+            triggerTroopDamageFlash(target.mesh);
+            if(target.mesh.userData.hp<=0) target.mesh.userData.alive = false;
+          }
+          t.mesh.userData.cooldown = t.mesh.userData.rate;
+          t.mesh.userData.shootPause = 1;
+        } else if(state.enemy.troops === 'ranged' || state.enemy.troops === 'magic') {
+          if(isGeneralTarget(target, generalMeshes[0])) {
+            spawnProjectile(t.mesh.position, target.mesh.position, t.atk * state.enemyFormation.bonus.atk, null, t.mesh.userData.isPlayer, true);
+            t.mesh.userData.cooldown = t.mesh.userData.rate;
+            t.mesh.userData.shootPause = 1;
+          } else {
+            spawnProjectile(t.mesh.position, target.mesh.position, t.atk * state.enemyFormation.bonus.atk, target, t.mesh.userData.isPlayer);
+            t.mesh.userData.cooldown = t.mesh.userData.rate;
+            t.mesh.userData.shootPause = 1;
+          }
+        }
+      }
+    }
+  });
+  // Animate projectiles
+  animateProjectiles();
+  // Generals take damage if all troops dead
+  if(eAlive.length===0) state.enemyHP -= 10;
+  if(pAlive.length===0) state.playerHP -= 10;
+  // Animate dead troops
+  state.playerTroops.forEach(t=>{
+    if(!t.mesh.userData.alive && t.mesh.visible !== false) {
+      // Trigger troop death effect
+      triggerTroopDeathEffect(t.mesh);
+    }
+  });
+  state.enemyTroops.forEach(t=>{
+    if(!t.mesh.userData.alive && t.mesh.visible !== false) {
+      // Trigger troop death effect
+      triggerTroopDeathEffect(t.mesh);
+    }
+  });
+  // Check win/lose
+  if(state.enemyHP<=0 || state.playerHP<=0) {
+    // Trigger death effects
+    if(state.enemyHP<=0 && !generalMeshes[1].userData.deathStart) {
+      triggerGeneralDeathEffect(1);
+    }
+    if(state.playerHP<=0 && !generalMeshes[0].userData.deathStart) {
+      triggerGeneralDeathEffect(0);
+    }
+    // End battle after a short delay to show death effects
+    setTimeout(() => {
+      if(state.enemyHP<=0 || state.playerHP<=0) {
+        endBattle();
+      }
+    }, 2000);
+  }
+
+}
+function endBattle() {
+  state.phase = 'end';
+  let win = state.playerHP>0;
+  phaseMsg.textContent = win ? 'Victory! 🎉' : 'Defeat! 😢';
+  // Score: base + HP + troops
+  let roundScore = (win?100:30) + Math.max(0,state.playerHP) + state.playerTroops.filter(t=>t.mesh.userData.alive).length*10;
+  state.playerScore += roundScore;
+  state.enemyScore += win?0:100;
+  setTimeout(()=>showScoreboard(win, roundScore), 1200);
+}
+function showScoreboard(win, roundScore) {
+  scoreboard.style.display = '';
+  scoreboard.innerHTML = `<h2>${win?'Victory!':'Defeat!'}</h2>
+    <div>Round: ${state.round}/${ROUND_LIMIT}</div>
+    <div>Score this round: <b>${roundScore}</b></div>
+    <div>Total Score: <b>${state.playerScore}</b></div>
+    <div>Enemy Score: <b>${state.enemyScore}</b></div>
+    <div>Player HP: ${Math.max(0,state.playerHP)} | Enemy HP: ${Math.max(0,state.enemyHP)}</div>
+    <div>Troops left: ${state.playerTroops.filter(t=>t.mesh.userData.alive).length}</div>
+    <button class="menu-btn" id="nextBtn">${state.round<ROUND_LIMIT?'Next Round':'Finish Game'}</button>`;
+  if(state.round>=ROUND_LIMIT) {
+    scoreboard.innerHTML += `<button class="menu-btn" id="restartBtn">Restart</button>`;
+    scoreboard.innerHTML += `<button id="shareBtn">Share Your Victory</button>`;
+    // Save score
+    state.scores.push({score:state.playerScore, date:Date.now()});
+    state.scores = state.scores.slice(-10);
+    localStorage.setItem('bf_scores', JSON.stringify(state.scores));
+    // Leaderboard
+    scoreboard.innerHTML += `<h3>Leaderboard</h3><ol>${state.scores.sort((a,b)=>b.score-a.score).map(s=>`<li>${s.score} (${new Date(s.date).toLocaleDateString()})</li>`).join('')}</ol>`;
+    document.getElementById('shareBtn').onclick = shareScore;
+    document.getElementById('restartBtn').onclick = startGame;
+  }
+  document.getElementById('nextBtn').onclick = () => {
+    state.round++;
+    if(state.round>ROUND_LIMIT) startGame();
+    else nextRound();
+  };
+}
+function shareScore() {
+  const txt = `I scored ${state.playerScore} in General's Gambit! Can you beat me? #GeneralsGambit`;
+  const url = encodeURIComponent(window.location.href);
+  const tweet = `https://twitter.com/intent/tweet?text=${encodeURIComponent(txt)}&url=${url}`;
+  window.open(tweet, '_blank');
+}
+function updateUI() {
+  cardRow.innerHTML = '';
+  scoreboard.style.display = 'none';
+}
+
+// Projectiles array
+let projectiles = [];
+
+function spawnProjectile(start, end, damage, target, isPlayer, isGeneral) {
+  // Determine projectile type based on troop type
+  let isArrow = false;
+  let isBullet = false;
+  let troopColor = isPlayer ? 0x1da1f2 : 0xff5e62;
+  
+  // Try to get the actual troop color from the shooter if possible
+  if (target && target.mesh && target.mesh.userData && target.mesh.userData.troopColor) {
+    troopColor = target.mesh.userData.troopColor;
+  }
+  if (isPlayer && state.playerTroops.length > 0) {
+    troopColor = state.playerTroops[0].mesh.userData.troopColor || troopColor;
+  } else if (!isPlayer && state.enemyTroops.length > 0) {
+    troopColor = state.enemyTroops[0].mesh.userData.troopColor || troopColor;
+  }
+  
+  if (isPlayer) {
+    isArrow = state.player.troops === 'ranged';
+  } else {
+    isArrow = state.enemy.troops === 'ranged';
+  }
+  // Distance-based duration
+  const dist = start.distanceTo(end);
+  const minDur = 0.75, maxDur = 1.5;
+  const duration = Math.max(minDur, Math.min(maxDur, dist * 0.13 + 0.5));
+  let proj;
+  
+  if (isBullet) {
+    // Simple bullet projectile
+    const bullet = new THREE.Mesh(
+      new THREE.SphereGeometry(0.02, 8, 8),
+      new THREE.MeshBasicMaterial({color: 0xFFFF00, transparent: true, opacity: 0.9}) // Yellow bullet
+    );
+    
+    // Bullet trail
+    const trail = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.01, 0.01, 0.08, 4),
+      new THREE.MeshBasicMaterial({color: 0xFFFF00, transparent: true, opacity: 0.6})
+    );
+    trail.position.z = -0.04;
+    trail.rotation.x = Math.PI / 2;
+    bullet.add(trail);
+    
+    proj = bullet;
+  } else if (isArrow) {
+    // Create an enhanced arrow with detailed components
+    const arrowGroup = new THREE.Group();
+    
+    // Arrow shaft (main body) - built along Z-axis (forward)
+    const shaft = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.015, 0.015, 0.7, 8),
+      new THREE.MeshBasicMaterial({color: 0x8B4513, transparent: true, opacity: 0.9}) // Brown wood color
+    );
+    arrowGroup.add(shaft);
+    
+    // Arrowhead (metal tip) - more detailed
+    const arrowhead = new THREE.Mesh(
+      new THREE.ConeGeometry(0.025, 0.1, 8),
+      new THREE.MeshBasicMaterial({color: 0xC0C0C0, transparent: true, opacity: 0.95}) // Silver color
+    );
+    arrowhead.position.z = 0.4; // At the front
+    arrowhead.rotation.x = Math.PI; // Point forward
+    arrowGroup.add(arrowhead);
+    
+    // Arrowhead base ring
+    const arrowheadBase = new THREE.Mesh(
+      new THREE.TorusGeometry(0.025, 0.005, 4, 8),
+      new THREE.MeshBasicMaterial({color: 0x8B4513, transparent: true, opacity: 0.9})
+    );
+    arrowheadBase.position.z = 0.35;
+    arrowheadBase.rotation.x = Math.PI / 2;
+    arrowGroup.add(arrowheadBase);
+    
+    // Enhanced fletching (feathers at the back) - multiple feathers
+    for (let i = 0; i < 3; i++) {
+      const feather = new THREE.Mesh(
+        new THREE.BoxGeometry(0.06, 0.02, 0.08),
+        new THREE.MeshBasicMaterial({color: 0xFFD700, transparent: true, opacity: 0.8}) // Gold color
+      );
+      feather.position.z = -0.35; // At the back
+      feather.position.x = (i - 1) * 0.04; // Spread out
+      feather.rotation.y = (i - 1) * 0.2; // Angled
+      arrowGroup.add(feather);
+    }
+    
+    // Arrow nock (notch at the end)
+    const nock = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.01, 0.01, 0.05, 6),
+      new THREE.MeshBasicMaterial({color: 0x654321, transparent: true, opacity: 0.9}) // Dark brown
+    );
+    nock.position.z = -0.4;
+    arrowGroup.add(nock);
+    
+    // Enhanced glow effect around the arrow
+    const glow = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.022, 0.022, 0.7, 8),
+      new THREE.MeshBasicMaterial({color: troopColor, transparent: true, opacity: 0.12})
+    );
+    arrowGroup.add(glow);
+    
+    // Motion blur effect (trailing particles)
+    for (let i = 0; i < 3; i++) {
+      const particle = new THREE.Mesh(
+        new THREE.SphereGeometry(0.008, 4, 4),
+        new THREE.MeshBasicMaterial({color: troopColor, transparent: true, opacity: 0.3})
+      );
+      particle.position.z = -0.2 - i * 0.1;
+      particle.position.x = (Math.random() - 0.5) * 0.02;
+      particle.position.y = (Math.random() - 0.5) * 0.02;
+      arrowGroup.add(particle);
+    }
+    
+    proj = arrowGroup;
+  } else {
+    // Procedurally generated lightning bolt for magic
+    const numSegments = 12;
+    const points = [];
+    for (let i = 0; i <= numSegments; i++) {
+      const t = i / numSegments;
+      const pos = new THREE.Vector3().lerpVectors(start, end, t);
+      if (i !== 0 && i !== numSegments) {
+        pos.x += (Math.random() - 0.5) * 0.25;
+        pos.y += (Math.random() - 0.5) * 0.25;
+        pos.z += (Math.random() - 0.5) * 0.25;
+      }
+      points.push(pos);
+    }
+    // Brighter lightning: white core, cyan glow
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+    const coreMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 2, transparent: true, opacity: 1 });
+    const coreLine = new THREE.Line(geometry.clone(), coreMaterial);
+    const mainMaterial = new THREE.LineBasicMaterial({ color: 0x99ccff, linewidth: 4, transparent: true, opacity: 0.95 });
+    const mainLine = new THREE.Line(geometry.clone(), mainMaterial);
+    const glowMaterial = new THREE.LineBasicMaterial({ color: 0x00ffff, linewidth: 10, transparent: true, opacity: 0.45 });
+    const glow = new THREE.Line(geometry.clone(), glowMaterial);
+    const group = new THREE.Group();
+    group.add(glow);
+    group.add(mainLine);
+    group.add(coreLine);
+    // Add tiny sparks
+    const sparks = [];
+    const numSparks = 8 + Math.floor(Math.random() * 5);
+    for (let i = 0; i < numSparks; i++) {
+      const segIdx = 1 + Math.floor(Math.random() * (numSegments - 1));
+      const base = points[segIdx].clone();
+      const dir = new THREE.Vector3((Math.random()-0.5), (Math.random()-0.5), (Math.random()-0.5)).normalize();
+      const speed = 0.12 + Math.random() * 0.18;
+      const spark = new THREE.Mesh(
+        new THREE.SphereGeometry(0.025, 4, 4),
+        new THREE.MeshBasicMaterial({ color: 0xffffcc, transparent: true, opacity: 0.95 })
+      );
+      spark.position.copy(base);
+      spark.userData = { dir, speed, base: base.clone(), t0: 0 };
+      group.add(spark);
+      sparks.push(spark);
+    }
+    proj = group;
+    proj.userData = { lightningPoints: points, start: start.clone(), end: end.clone(), numSegments, sparks };
+  }
+  proj.position.copy(start.clone());
+  scene.add(proj);
+  // Store projectile with time-based animation
+  projectiles.push({
+    mesh: proj,
+    start: start.clone(),
+    end: end.clone(),
+    damage, target, isPlayer, isGeneral: !!isGeneral,
+    isArrow, isBullet,
+    t: 0, // 0 to 1
+    duration: duration,
+    startTime: performance.now(),
+    impactEffect: false,
+  });
+}
+function animateProjectiles() {
+  // Move projectiles, apply damage on impact, then remove
+  const now = performance.now();
+  for(let i=projectiles.length-1; i>=0; i--) {
+    const p = projectiles[i];
+    // Time-based interpolation for smoothness
+    const elapsed = (now - p.startTime) / 1000;
+    let t = Math.min(1, elapsed / p.duration);
+    // Ease-out quadratic
+    t = 1 - (1-t)*(1-t);
+    p.t = t;
+    // Straight line for bullets, parabolic arc for arrows
+    if(p.isBullet) {
+      // Linear movement for bullets
+      const pos = new THREE.Vector3().lerpVectors(p.start, p.end, t);
+      p.mesh.position.copy(pos);
+      
+      // Calculate direction for bullet rotation
+      const dir = new THREE.Vector3().subVectors(p.end, p.start).normalize();
+      p.mesh.setRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(
+        new THREE.Vector3(0, 0, 1), // Bullet's forward direction is Z
+        dir
+      ));
+    } else if(p.isArrow) {
+      // Linear XZ, arc in Y
+      const pos = new THREE.Vector3().lerpVectors(p.start, p.end, t);
+      // Height of arc: max at t=0.5, 0 at t=0 or t=1
+      const arcHeight = 1.2 + 0.2 * Math.random();
+      const yArc = arcHeight * 4 * t * (1-t); // parabola
+      pos.y += yArc;
+      p.mesh.position.copy(pos);
+      
+      // Calculate the direction the arrow should point (tangent to the arc)
+      const baseDir = new THREE.Vector3().subVectors(p.end, p.start).normalize();
+      // Add the vertical component from the arc
+      const arcSlope = arcHeight * 4 * (1 - 2*t); // derivative of parabola
+      const tangentDir = new THREE.Vector3(baseDir.x, arcSlope, baseDir.z).normalize();
+      
+      // Set the arrow rotation to point in the direction of travel
+      p.mesh.setRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(
+        new THREE.Vector3(0, 0, 1), // Arrow's forward direction is Z
+        tangentDir
+      ));
+    } else {
+      // Animate lightning bolt
+      if (p.mesh.userData && p.mesh.userData.lightningPoints) {
+        const points = [];
+        for (let i = 0; i <= p.mesh.userData.numSegments; i++) {
+          const tSeg = i / p.mesh.userData.numSegments;
+          const pos = new THREE.Vector3().lerpVectors(p.mesh.userData.start, p.mesh.userData.end, tSeg);
+          if (i !== 0 && i !== p.mesh.userData.numSegments) {
+            pos.x += (Math.random() - 0.5) * 0.25;
+            pos.y += (Math.random() - 0.5) * 0.25;
+            pos.z += (Math.random() - 0.5) * 0.25;
+          }
+          points.push(pos);
+        }
+        // Update geometry for all lines
+        p.mesh.children[0].geometry.setFromPoints(points); // glow
+        p.mesh.children[1].geometry.setFromPoints(points); // main
+        p.mesh.children[2].geometry.setFromPoints(points); // core
+        // Animate sparks
+        if (p.mesh.userData.sparks) {
+          for (const spark of p.mesh.userData.sparks) {
+            // t: 0 (start) to 1 (end of projectile)
+            const tSpark = p.t;
+            spark.position.copy(spark.userData.base).add(spark.userData.dir.clone().multiplyScalar(tSpark * spark.userData.speed * 6));
+            spark.material.opacity = 0.95 * (1 - tSpark);
+          }
+        }
+      } else {
+        // fallback for any other group
+        p.mesh.position.lerpVectors(p.start, p.end, t);
+      }
+    }
+    // Fade in at start, fade out at end
+    let baseOpacity = 0.92;
+    if (t < 0.15) baseOpacity *= t/0.15;
+    if (t > 0.85) baseOpacity *= (1-t)/0.15;
+    
+    // Handle opacity for both individual meshes (orbs) and groups (arrows and magic)
+    p.mesh.traverse((child) => {
+      if (child.material) {
+        child.material.opacity = baseOpacity;
+      }
+    });
+    // For the first child (glow), set lower opacity if it exists and has material
+    if (p.mesh.children && p.mesh.children[0] && p.mesh.children[0].material) {
+      p.mesh.children[0].material.opacity = baseOpacity * 0.3;
+    }
+    // Impact effect: scale pop and flash
+    if (t >= 1 && !p.impactEffect) {
+      p.impactEffect = true;
+      p.mesh.scale.set(1.25,1.25,1.25);
+      
+      // Handle opacity for impact effect
+      p.mesh.traverse((child) => {
+        if (child.material) {
+          child.material.opacity = 1;
+        }
+      });
+      
+      setTimeout(()=>{
+        scene.remove(p.mesh);
+        projectiles.splice(i,1);
+      }, 120);
+      // Apply damage if target still alive
+      if(p.isGeneral) {
+        if(p.isPlayer) {
+          if (state.enemyHP > 0) {
+            state.enemyHP -= p.damage;
+            triggerGeneralDamageEffect(1);
+          }
+        } else {
+          if (state.playerHP > 0) {
+            state.playerHP -= p.damage;
+            triggerGeneralDamageEffect(0);
+          }
+        }
+      } else if(p.target && p.target.mesh.userData.alive) {
+        let dmgTaken = p.damage;
+        // If target is player troop and player is waiting, reduce damage
+        if(p.target.mesh.userData.isPlayer && state.playerOrder === 'wait') dmgTaken *= 0.5;
+        // If target is enemy troop and enemy is waiting, reduce damage
+        if(!p.target.mesh.userData.isPlayer && state.enemyOrder === 'wait') dmgTaken *= 0.5;
+        p.target.mesh.userData.hp -= dmgTaken;
+        triggerTroopDamageFlash(p.target.mesh);
+        if(p.target.mesh.userData.hp<=0) p.target.mesh.userData.alive = false;
+      }
+      continue;
+    }
+    if(t >= 1) {
+      // Already handled by impact effect above
+    }
+  }
+}
+
+// Add movement order toggle UI
+function renderOrderToggle() {
+  let menu = document.getElementById('orderToggle');
+  if (!menu) {
+    menu = document.createElement('div');
+    menu.id = 'orderToggle';
+    menu.style.display = 'flex';
+    menu.style.gap = '1em';
+    menu.style.margin = '1em 0';
+    menu.style.pointerEvents = 'auto';
+    menu.style.justifyContent = 'center';
+    menu.style.alignItems = 'center';
+    menu.style.fontSize = '1.1em';
+    document.getElementById('ui').appendChild(menu);
+  }
+  
+  // Show formation info with speed bonus
+  const speedBonus = state.playerFormation ? state.playerFormation.bonus.speed : 1;
+  const speedText = speedBonus > 1 ? `+${Math.round((speedBonus-1)*100)}%` : 
+                   speedBonus < 1 ? `-${Math.round((1-speedBonus)*100)}%` : 'Normal';
+  
+  menu.innerHTML = `<b>Troop Orders:</b> <span style="font-size:0.9em; opacity:0.8;">(${state.playerFormation?.name} - Speed: ${speedText})</span>`;
+  ['advance','wait','retreat'].forEach(opt => {
+    const btn = document.createElement('button');
+    btn.className = 'menu-btn';
+    btn.textContent = opt.charAt(0).toUpperCase() + opt.slice(1);
+    if(state.playerOrder === opt) btn.style.background = '#222';
+    btn.onclick = () => { state.playerOrder = opt; renderOrderToggle(); };
+    menu.appendChild(btn);
+  });
+}
+
+// Add a global array to track death effects
+let deathEffects = [];
+
+// Animate general death effects
+function animateGeneralDeathEffects() {
+  generalMeshes.forEach((gen, idx) => {
+    if (gen.userData.deathStart) {
+      const now = performance.now();
+      const elapsed = now - gen.userData.deathStart;
+      const t = Math.min(1, elapsed / gen.userData.deathDuration);
+      
+      if (t < 1) {
+        // Fall down and fade out
+        gen.position.y = -2 * t; // Fall down
+        gen.rotation.z = Math.PI * 0.5 * t; // Tilt over
+        
+        // Fade out all materials
+        gen.traverse((child) => {
+          if (child.material) {
+            if (child.material.opacity !== undefined) {
+              child.material.opacity = 1 - t;
+            } else if (child.material.transparent !== true) {
+              child.material.transparent = true;
+              child.material.opacity = 1 - t;
+            }
+          }
+        });
+      } else {
+        // Death animation complete
+        gen.visible = false;
+        delete gen.userData.deathStart;
+        delete gen.userData.deathDuration;
+      }
+    }
+  });
+}
+
+// Troop death effect
+function triggerTroopDeathEffect(troopMesh) {
+  if (troopMesh.userData.deathStarted) return; // Prevent multiple triggers
+  
+  troopMesh.userData.deathStarted = true;
+  troopMesh.userData.deathStart = performance.now();
+  troopMesh.userData.deathDuration = 800;
+  
+  // Create explosion effect
+  const explosion = new THREE.Mesh(
+    new THREE.SphereGeometry(0.3, 12, 12),
+    new THREE.MeshBasicMaterial({
+      color: troopMesh.userData.troopColor || 0x888888,
+      transparent: true,
+      opacity: 0.9
+    })
+  );
+  explosion.position.copy(troopMesh.position);
+  explosion.scale.set(0.1, 0.1, 0.1);
+  scene.add(explosion);
+  
+  // Animate explosion
+  const startTime = performance.now();
+  const duration = 600;
+  
+  function animateExplosion() {
+    const elapsed = performance.now() - startTime;
+    const t = Math.min(1, elapsed / duration);
+    
+    // Scale up and fade out
+    const scale = 0.1 + 2 * t;
+    explosion.scale.set(scale, scale, scale);
+    explosion.material.opacity = 0.9 * (1 - t);
+    
+    if (t < 1) {
+      requestAnimationFrame(animateExplosion);
+    } else {
+      scene.remove(explosion);
+    }
+  }
+  
+  animateExplosion();
+  
+  // Spawn soul orb effect
+  spawnDeathEffect(troopMesh.position, troopMesh.userData.troopColor || 0x888888);
+}
+
+// Animate troop death effects
+function animateTroopDeathEffects() {
+  // Check player troops
+  state.playerTroops.forEach(troop => {
+    if (troop.mesh.userData.deathStart) {
+      const now = performance.now();
+      const elapsed = now - troop.mesh.userData.deathStart;
+      const t = Math.min(1, elapsed / troop.mesh.userData.deathDuration);
+      
+      if (t < 1) {
+        // Fall down and fade out
+        troop.mesh.position.y = -0.8 * t; // Fall down
+        troop.mesh.rotation.z = Math.PI * 0.3 * t; // Tilt over slightly
+        
+        // Scale down
+        const scale = 1 - 0.5 * t;
+        troop.mesh.scale.set(scale, scale, scale);
+        
+        // Fade out all materials
+        troop.mesh.traverse((child) => {
+          if (child.material) {
+            if (child.material.opacity !== undefined) {
+              child.material.opacity = 1 - t;
+            } else if (child.material.transparent !== true) {
+              child.material.transparent = true;
+              child.material.opacity = 1 - t;
+            }
+          }
+        });
+      } else {
+        // Death animation complete
+        troop.mesh.visible = false;
+        scene.remove(troop.mesh);
+        delete troop.mesh.userData.deathStart;
+        delete troop.mesh.userData.deathDuration;
+        delete troop.mesh.userData.deathStarted;
+      }
+    }
+  });
+  
+  // Check enemy troops
+  state.enemyTroops.forEach(troop => {
+    if (troop.mesh.userData.deathStart) {
+      const now = performance.now();
+      const elapsed = now - troop.mesh.userData.deathStart;
+      const t = Math.min(1, elapsed / troop.mesh.userData.deathDuration);
+      
+      if (t < 1) {
+        // Fall down and fade out
+        troop.mesh.position.y = -0.8 * t; // Fall down
+        troop.mesh.rotation.z = Math.PI * 0.3 * t; // Tilt over slightly
+        
+        // Scale down
+        const scale = 1 - 0.5 * t;
+        troop.mesh.scale.set(scale, scale, scale);
+        
+        // Fade out all materials
+        troop.mesh.traverse((child) => {
+          if (child.material) {
+            if (child.material.opacity !== undefined) {
+              child.material.opacity = 1 - t;
+            } else if (child.material.transparent !== true) {
+              child.material.transparent = true;
+              child.material.opacity = 1 - t;
+            }
+          }
+        });
+      } else {
+        // Death animation complete
+        troop.mesh.visible = false;
+        scene.remove(troop.mesh);
+        delete troop.mesh.userData.deathStart;
+        delete troop.mesh.userData.deathDuration;
+        delete troop.mesh.userData.deathStarted;
+      }
+    }
+  });
+}
+
+function spawnDeathEffect(position, color) {
+  // Create a glowing orb
+  const soul = new THREE.Mesh(
+    new THREE.SphereGeometry(0.18, 10, 10),
+    new THREE.MeshBasicMaterial({color, transparent: true, opacity: 0.85})
+  );
+  soul.position.copy(position.clone());
+  scene.add(soul);
+  deathEffects.push({mesh: soul, start: performance.now(), duration: 700});
+}
+
+function animateDeathEffects() {
+  const now = performance.now();
+  for(let i=deathEffects.length-1; i>=0; i--) {
+    const d = deathEffects[i];
+    const t = Math.min(1, (now - d.start) / d.duration);
+    d.mesh.material.opacity = 0.85 * (1-t);
+    d.mesh.scale.set(1+0.7*t, 1+0.7*t, 1+0.7*t);
+    d.mesh.position.y += 0.008;
+    if(t >= 1) {
+      scene.remove(d.mesh);
+      deathEffects.splice(i,1);
+    }
+  }
+}
+
+// Add general damage effect state
+let generalDamageEffects = [null, null]; // [player, enemy]
+
+function triggerGeneralDamageEffect(idx) {
+  const gen = generalMeshes[idx];
+  if (!gen) return;
+  generalDamageEffects[idx] = {start: performance.now(), duration: 340, mesh: gen, flashed: false};
+  
+  // Flash white effect
+  gen.traverse((child) => {
+    if (child.material && child.material.color) {
+      // Store original color if not already stored
+      if (!child.userData.originalColor) {
+        child.userData.originalColor = child.material.color.clone();
+      }
+      // Flash to white
+      child.material.color.setHex(0xffffff);
+    }
+  });
+}
+
+function animateGeneralDamageEffects() {
+  const now = performance.now();
+  for (let i = 0; i < generalDamageEffects.length; i++) {
+    const eff = generalDamageEffects[i];
+    if (!eff) continue;
+    const t = Math.min(1, (now - eff.start) / eff.duration);
+    if (t < 0.18) {
+      // Shake only (no scale change)
+      const shake = 0.15 * Math.sin(Date.now() * 0.02) * (1 - t/0.18);
+      eff.mesh.position.x += shake;
+      eff.mesh.position.z += shake * 0.5;
+      eff.flashed = true;
+    } else if (t < 1) {
+      // Reduce shake intensity over time
+      const shake = 0.15 * Math.sin(Date.now() * 0.02) * (1 - t) * 0.3;
+      eff.mesh.position.x += shake;
+      eff.mesh.position.z += shake * 0.5;
+    } else {
+      // End effect - restore original position and colors
+      // Reset position to original
+      if (i === 0) {
+        eff.mesh.position.set(0, 0, 6);
+      } else {
+        eff.mesh.position.set(0, 0, -6);
+      }
+      // Restore original colors
+      eff.mesh.traverse((child) => {
+        if (child.material && child.material.color && child.userData.originalColor) {
+          child.material.color.copy(child.userData.originalColor);
+        }
+      });
+      generalDamageEffects[i] = null;
+    }
+  }
+}
+
+// Add a helper function to robustly check if a target is a general
+function isGeneralTarget(target, generalMesh) {
+  // Prefer explicit flag, fallback to mesh reference
+  return (target.userData && target.userData.isGeneral) || (target.mesh === generalMesh);
+}
+
+// Trigger damage flash effect for troops
+function triggerTroopDamageFlash(troopMesh) {
+  troopMesh.userData.damageFlashStart = performance.now();
+  troopMesh.userData.damageFlashDuration = 200; // 200ms flash duration
+}
+
+// General death effect
+function triggerGeneralDeathEffect(idx) {
+  const gen = generalMeshes[idx];
+  if (!gen) return;
+  
+  // Create explosion effect
+  const explosion = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 16, 16),
+    new THREE.MeshBasicMaterial({
+      color: 0xff4444,
+      transparent: true,
+      opacity: 0.8
+    })
+  );
+  explosion.position.copy(gen.position);
+  explosion.scale.set(0.1, 0.1, 0.1);
+  scene.add(explosion);
+  
+  // Animate explosion
+  const startTime = performance.now();
+  const duration = 1000;
+  
+  function animateExplosion() {
+    const elapsed = performance.now() - startTime;
+    const t = Math.min(1, elapsed / duration);
+    
+    // Scale up and fade out
+    const scale = 0.1 + 3 * t;
+    explosion.scale.set(scale, scale, scale);
+    explosion.material.opacity = 0.8 * (1 - t);
+    
+    if (t < 1) {
+      requestAnimationFrame(animateExplosion);
+    } else {
+      scene.remove(explosion);
+    }
+  }
+  
+  animateExplosion();
+  
+  // Make general fall down and fade out
+  gen.userData.deathStart = performance.now();
+  gen.userData.deathDuration = 1500;
+}
+
+// --- Start ---
+window.onload = () => {
+  init3D();
+  startGame();
+  animate();
+};
+  </script>
 </body>
 </html> 
